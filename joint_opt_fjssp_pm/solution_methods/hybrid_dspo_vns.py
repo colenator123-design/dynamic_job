@@ -1,23 +1,21 @@
-
 import random
 
 class HybridDspoVns:
-    def __init__(self, jobs, machines, population_size, max_iterations_dspo, max_iterations_vns):
+    def __init__(self, jobs, machines, config):
         """
         初始化混合 DPSO-VNS 演算法。
 
         參數:
             jobs (list): 工件物件列表。
             machines (list): 機器物件列表。
-            population_size (int): 粒子群的大小。
-            max_iterations_dspo (int): DPSO 的最大迭代次數。
-            max_iterations_vns (int): VNS 的最大迭代次數。
+            config (object): 包含所有演算法和成本參數的設定物件。
         """
         self.jobs = jobs
         self.machines = machines
-        self.population_size = population_size
-        self.max_iterations_dspo = max_iterations_dspo
-        self.max_iterations_vns = max_iterations_vns
+        self.config = config
+        self.population_size = config.POPULATION_SIZE
+        self.max_iterations_dspo = config.MAX_ITERATIONS_DPSO
+        self.max_iterations_vns = config.MAX_ITERATIONS_VNS
         self.g_best = None # 全局最佳解
 
     def run_stage_one(self):
@@ -106,7 +104,11 @@ class HybridDspoVns:
             machine_id = particle['ms'][i]
             
             op_id = op_counters[job_id]
-            operation = self.jobs[job_id].operations[op_id]
+            # 找到對應的 Job 物件
+            current_job = next((j for j in self.jobs if j.job_id == job_id), None)
+            if current_job is None:
+                raise ValueError(f"Job with ID {job_id} not found during initialization.")
+            operation = current_job.operations[op_id]
             processing_time = operation.candidate_machines[machine_id]
 
             # 計算工序的開始時間
@@ -201,7 +203,11 @@ class HybridDspoVns:
                 op_count += 1
         op_id = op_count - 1
 
-        operation = self.jobs[job_id].operations[op_id]
+        # 找到對應的 Job 物件
+        current_job = next((j for j in self.jobs if j.job_id == job_id), None)
+        if current_job is None:
+            raise ValueError(f"Job with ID {job_id} not found during _v_ma.")
+        operation = current_job.operations[op_id]
         if len(operation.candidate_machines) > 1:
             # 從候選機器中選擇一個不同於當前的機器
             current_machine = p['ms'][op_index]
@@ -245,22 +251,34 @@ class HybridDspoVns:
         job_indices = list(range(num_jobs))
         random.shuffle(job_indices)
         
-        # 將工件隨機分為兩個集合
         set1_size = random.randint(1, num_jobs - 1)
         job_set1 = set(job_indices[:set1_size])
         job_set2 = set(job_indices[set1_size:])
 
         # 從 p1 繼承 job_set1 的部分
         new_os1 = [op for op in p1_os if op in job_set1]
-        new_ms1 = [p1_ms[i] for i, op in enumerate(p1_os) if op in job_set1]
 
         # 從 p2 繼承 job_set2 的部分
         new_os2 = [op for op in p2_os if op in job_set2]
-        new_ms2 = [p2_ms[i] for i, op in enumerate(p2_os) if op in job_set2]
 
-        # 合併產生新的 OS 和 MS
+        # 合併產生新的 OS
         new_os = new_os1 + new_os2
-        new_ms = new_ms1 + new_ms2
+
+        # Re-generate new_ms to ensure validity for the new_os
+        new_ms = []
+        op_counters = {job.job_id: 0 for job in self.jobs} # Reset op_counters for new_os
+        for job_id in new_os:
+            op_id = op_counters[job_id]
+            current_job = next((j for j in self.jobs if j.job_id == job_id), None)
+            if current_job is None:
+                raise ValueError(f"Job with ID {job_id} not found during _c_job.")
+            operation = current_job.operations[op_id]
+            
+            # Randomly choose a valid machine for this operation
+            machine_id = random.choice(list(operation.candidate_machines.keys()))
+            new_ms.append(machine_id)
+            
+            op_counters[job_id] += 1
 
         return {'os': new_os, 'ms': new_ms, 'p_best': p1['p_best'], 'fitness': p1['fitness']}
 
@@ -272,95 +290,30 @@ class HybridDspoVns:
         p2_os, p2_ms = p2['os'], p2['ms']
         
         new_os = []
-        new_ms = []
-
-        # 創建 p2 中 OS 的副本，用於從中移除元素
         p2_os_copy = list(p2_os)
-
-        # 隨機選擇交叉點
         crossover_points = sorted(random.sample(range(len(p1_os)), 2))
         start, end = crossover_points[0], crossover_points[1]
-
-        # 中間部分直接從 p1 繼承
         middle_os = p1_os[start:end]
-        middle_ms = p1_ms[start:end]
-
-        # 將中間部分的元素從 p2_os_copy 中移除
-        for op in middle_os:
-            if op in p2_os_copy:
-                p2_os_copy.remove(op)
-
-        # 填充前後部分
+        for op_val in middle_os:
+            if op_val in p2_os_copy:
+                p2_os_copy.remove(op_val)
         new_os = p2_os_copy[:start] + middle_os + p2_os_copy[start:]
-        # MS 部分也需要對應地從 p2 繼承
-        # 這一步比較複雜，需要確保 OS 和 MS 的對應關係
-        # 為了簡化，我們先直接使用 p1 的 MS
-        new_ms = p1_ms 
 
-        return {'os': new_os, 'ms': new_ms, 'p_best': p1['p_best'], 'fitness': p1['fitness']}
-
-    def _c_job(self, p1, p2):
-        """
-        C_job (Job-based Crossover) 操作。
-        """
-        p1_os, p1_ms = p1['os'], p1['ms']
-        p2_os, p2_ms = p2['os'], p2['ms']
-        
-        num_jobs = len(self.jobs)
-        job_indices = list(range(num_jobs))
-        random.shuffle(job_indices)
-        
-        # 將工件隨機分為兩個集合
-        set1_size = random.randint(1, num_jobs - 1)
-        job_set1 = set(job_indices[:set1_size])
-        job_set2 = set(job_indices[set1_size:])
-
-        # 從 p1 繼承 job_set1 的部分
-        new_os1 = [op for op in p1_os if op in job_set1]
-        new_ms1 = [p1_ms[i] for i, op in enumerate(p1_os) if op in job_set1]
-
-        # 從 p2 繼承 job_set2 的部分
-        new_os2 = [op for op in p2_os if op in job_set2]
-        new_ms2 = [p2_ms[i] for i, op in enumerate(p2_os) if op in job_set2]
-
-        # 合併產生新的 OS 和 MS
-        new_os = new_os1 + new_os2
-        new_ms = new_ms1 + new_ms2
-
-        return {'os': new_os, 'ms': new_ms, 'p_best': p1['p_best'], 'fitness': p1['fitness']}
-
-    def _c_op(self, p1, p2):
-        """
-        C_op (Operation-based Crossover) 操作。
-        """
-        p1_os, p1_ms = p1['os'], p1['ms']
-        p2_os, p2_ms = p2['os'], p2['ms']
-        
-        new_os = []
+        # Re-generate new_ms to ensure validity for the new_os
         new_ms = []
-
-        # 創建 p2 中 OS 的副本，用於從中移除元素
-        p2_os_copy = list(p2_os)
-
-        # 隨機選擇交叉點
-        crossover_points = sorted(random.sample(range(len(p1_os)), 2))
-        start, end = crossover_points[0], crossover_points[1]
-
-        # 中間部分直接從 p1 繼承
-        middle_os = p1_os[start:end]
-        middle_ms = p1_ms[start:end]
-
-        # 將中間部分的元素從 p2_os_copy 中移除
-        for op in middle_os:
-            if op in p2_os_copy:
-                p2_os_copy.remove(op)
-
-        # 填充前後部分
-        new_os = p2_os_copy[:start] + middle_os + p2_os_copy[start:]
-        # MS 部分也需要對應地從 p2 繼承
-        # 這一步比較複雜，需要確保 OS 和 MS 的對應關係
-        # 為了簡化，我們先直接使用 p1 的 MS
-        new_ms = p1_ms 
+        op_counters = {job.job_id: 0 for job in self.jobs} # Reset op_counters for new_os
+        for job_id in new_os:
+            op_id = op_counters[job_id]
+            current_job = next((j for j in self.jobs if j.job_id == job_id), None)
+            if current_job is None:
+                raise ValueError(f"Job with ID {job_id} not found during _c_op.")
+            operation = current_job.operations[op_id]
+            
+            # Randomly choose a valid machine for this operation
+            machine_id = random.choice(list(operation.candidate_machines.keys()))
+            new_ms.append(machine_id)
+            
+            op_counters[job_id] += 1
 
         return {'os': new_os, 'ms': new_ms, 'p_best': p1['p_best'], 'fitness': p1['fitness']}
 
@@ -402,7 +355,11 @@ class HybridDspoVns:
                 op_count += 1
         op_id = op_count - 1
 
-        operation = self.jobs[job_id].operations[op_id]
+        # 找到對應的 Job 物件
+        current_job = next((j for j in self.jobs if j.job_id == job_id), None)
+        if current_job is None:
+            raise ValueError(f"Job with ID {job_id} not found during _vns_change_machine.")
+        operation = current_job.operations[op_id]
         if len(operation.candidate_machines) > 1:
             new_machine = random.choice(list(operation.candidate_machines.keys()))
             new_particle['ms'][op_index] = new_machine
@@ -422,12 +379,15 @@ class HybridDspoVns:
 
     def calculate_fitness_stage_one(self, particle):
         """
-        計算第一階段的適應度函數值 (Makespan + TBC)。
+        計算第一階段的適應度函數值 (TTC + TBC)。
+        論文中的目標是最小化延遲和負載均衡，這裡我們簡化為 Makespan 和負載均衡。
         """
         schedule, makespan = self._decode_particle(particle)
 
-        # 1. 計算 Makespan 成本
-        makespan_cost = self.config['w_makespan'] * makespan
+        # 1. 計算 Makespan 成本 (作為 TTC 的代理)
+        # 注意：self.config 現在是整個 config 物件，成本參數在 COST_PARAMS 內
+        cost_params = self.config.COST_PARAMS
+        makespan_cost = cost_params['w_makespan'] * makespan
 
         # 2. 計算工作負載平衡懲罰 (TBC)
         machine_workloads = {m.machine_id: 0 for m in self.machines}
@@ -435,16 +395,57 @@ class HybridDspoVns:
             duration = op_info['end_time'] - op_info['start_time']
             machine_workloads[op_info['machine']] += duration
         
-        avg_workload = sum(machine_workloads.values()) / len(self.machines)
-        workload_variance = sum((wl - avg_workload)**2 for wl in machine_workloads.values()) / len(self.machines)
-        tbc = self.config['workload_balancing_penalty_weight'] * workload_variance
+        if not self.machines:
+            avg_workload = 0
+            workload_variance = 0
+        else:
+            avg_workload = sum(machine_workloads.values()) / len(self.machines)
+            workload_variance = sum((wl - avg_workload)**2 for wl in machine_workloads.values()) / len(self.machines)
+        
+        tbc = cost_params['workload_balancing_penalty_weight'] * workload_variance
 
         return makespan_cost + tbc
 
     def _decode_particle(self, particle):
         """
-        將粒子的編碼轉換為一個實際的排程方案。
+        將粒子的編碼 (OS, MS) 轉換為一個實際的排程方案。
+        返回一個包含所有工序排程資訊的字典和 makespan。
         """
-        # 實作兩層編碼的解碼過程
-        return {}
+        schedule = {}
+        machine_end_times = {m.machine_id: 0 for m in self.machines}
+        job_end_times = {j.job_id: 0 for j in self.jobs}
+        
+        op_counters = {j.job_id: 0 for j in self.jobs}
 
+        for i in range(len(particle['os'])):
+            job_id = particle['os'][i]
+            machine_id = particle['ms'][i]
+            
+            op_id = op_counters[job_id]
+            # 找到對應的 Job 物件
+            current_job = next((j for j in self.jobs if j.job_id == job_id), None)
+            if current_job is None:
+                raise ValueError(f"Job with ID {job_id} not found.")
+
+            operation = current_job.operations[op_id]
+            processing_time = operation.candidate_machines[machine_id]
+
+            # 計算工序的開始時間 (需滿足工序限制和機器限制)
+            start_time = max(machine_end_times[machine_id], job_end_times[job_id])
+            end_time = start_time + processing_time
+
+            # 更新機器的完工時間和工件的完工時間
+            machine_end_times[machine_id] = end_time
+            job_end_times[job_id] = end_time
+            
+            # 記錄排程結果
+            schedule[(job_id, op_id)] = {
+                'machine': machine_id,
+                'start_time': start_time,
+                'end_time': end_time
+            }
+            
+            op_counters[job_id] += 1
+            
+        makespan = max(machine_end_times.values()) if machine_end_times else 0
+        return schedule, makespan

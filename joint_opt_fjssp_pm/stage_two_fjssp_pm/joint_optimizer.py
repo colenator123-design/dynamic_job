@@ -70,62 +70,113 @@ class JointOptimizer:
 
     def _calculate_optimal_pm(self):
         """
-        參考 ga_solver.py 的邏輯，計算每台機器的最佳 PM 計畫。
+        根據論文公式 (16)-(18)，計算每台機器的最佳 PM 計畫。
+        使用數值搜索方法找到最小化 Vrk 的最佳 PM 間隔 Trk。
         返回一個字典，key 為 machine_id，value 為 PM 計畫。
         """
         pm_plans = {}
+        makespan = max(op['end_time'] for op in self.schedule.values()) if self.schedule else 0
+
         for machine in self.machines:
-            # 1. 計算機器的動態參數 (利用率、切換次數)
-            # 這些需要從當前的 schedule 中計算得出
+            # 1. 計算機器的動態參數
             utilization, switch_count = self._get_dynamic_params(machine.machine_id)
+            
+            best_interval = -1
+            min_vrk = float('inf')
 
-            # 2. 根據論文公式 (16)-(18) 和 ga_solver.py 的邏輯，找到最佳 PM 間隔 Trk
-            # 這是一個優化問題，需要找到 Trk 來最小化 Vrk
-            # 為了簡化，我們先假設一個固定的 PM 間隔
-            optimal_pm_interval = 100 # 這裡應該是一個計算結果
+            # 2. 數值搜索最佳 PM 間隔 Trk
+            # 搜索範圍從 1 到 makespan
+            for t_interval in range(1, int(makespan) + 1):
+                vrk = self._calculate_vrk_objective(t_interval, machine, utilization, switch_count)
+                if vrk < min_vrk:
+                    min_vrk = vrk
+                    best_interval = t_interval
 
-            # 3. 確定 PM 的時間點
-            # 這裡需要遍歷機器的排程，找到插入 PM 的最佳位置
-            # 暫時先假設在排程中間進行
-            pm_start_time = machine.workload / 2
-
-            pm_plans[machine.machine_id] = {
-                'interval': optimal_pm_interval,
-                'start_time': pm_start_time,
-                'duration': self.config['pm_duration']
-            }
+            if best_interval > 0:
+                # 論文中的 t*rk，即最佳 PM 時間點
+                # 簡化處理：假設維護週期從 0 開始，所以最佳時間點就是最佳間隔
+                optimal_pm_time_point = best_interval
+                pm_plans[machine.machine_id] = {
+                    'interval': best_interval,
+                    'start_time': optimal_pm_time_point,
+                    'duration': machine.maintenance_params['pm_duration']
+                }
         return pm_plans
+
+    def _calculate_vrk_objective(self, trk, machine, utilization, switch_count):
+        """
+        根據論文公式 (16)-(18) 計算 Vrk 的值。
+        """
+        m_params = machine.maintenance_params
+        cp_k = m_params['pm_cost']
+        cf_k = m_params['mr_cost']
+        tp_k = m_params['pm_duration']
+        tf_k = m_params['mr_duration']
+
+        # 計算累積故障率的積分
+        integral_lambda = self._get_failure_rate_integral(0, trk, machine, utilization, switch_count)
+
+        # 計算 VC_rk (維護成本率)
+        vc_rk_numerator = cp_k + cf_k * integral_lambda
+        vc_rk_denominator = trk + tp_k + tf_k * integral_lambda
+        vc_rk = vc_rk_numerator / vc_rk_denominator if vc_rk_denominator != 0 else float('inf')
+
+        # 計算 VA_rk (可用性)
+        va_rk_numerator = trk
+        va_rk_denominator = trk + tp_k + tf_k * integral_lambda
+        va_rk = va_rk_numerator / va_rk_denominator if va_rk_denominator != 0 else 0
+
+        # 論文中提到 VC_rk* 和 VA_rk* 是理論上的最優值，這裡我們用一個簡化的方式
+        # 我們直接最小化 Vrk = w1 * VC_rk - w2 * VA_rk (w1=w2=0.5)
+        # 這等價於最小化 VC_rk - VA_rk
+        vrk = vc_rk - va_rk
+        return vrk
+
+    def _get_failure_rate_integral(self, start_t, end_t, machine, utilization, switch_count):
+        """
+        計算動態 Weibull 分布在特定時間區間的累積故障風險。
+        """
+        m_params = machine.maintenance_params
+        theta = m_params['theta'] # Shape parameter (β in paper)
+        eta = m_params['eta']   # Scale parameter (η in paper)
+        
+        # 論文中沒有明確給出 f(βX) 的形式，但從 ga_solver.py 的邏輯推斷
+        # 影響因子是作用在尺度參數 eta 上的
+        # 這裡我們假設 f(βX) 是對 eta 的一個修正
+        # 為了簡化，我們直接使用 machine 的固有參數，忽略 X 的影響
+        # 在更完整的實作中，這裡應該加入 beta_vectors 的影響
+
+        if eta <= 0:
+            return float('inf')
+
+        # 計算 Weibull 分布的累積故障率積分 H(t) = (t/η)^θ
+        integral_end = (end_t / eta)**theta if end_t >= 0 else 0
+        integral_start = (start_t / eta)**theta if start_t >= 0 else 0
+        
+        return integral_end - integral_start
 
     def _get_dynamic_params(self, machine_id):
         """
         計算指定機器的利用率和作業切換次數。
         """
-        # 這裡需要根據 self.schedule 來計算
-        # 暫時返回模擬值
-        return 0.5, 10 # (utilization, switch_count)
+        machine_ops = [op for op in self.schedule.values() if op['machine'] == machine_id]
+        if not machine_ops:
+            return 0, 0
 
-    def _get_failure_rate_integral(self, start_t, end_t, machine_id, utilization, switch_count):
-        """
-        計算動態 Weibull 分布在特定時間區間的累積故障風險。
-        完全參考 ga_solver.py 的實作。
-        """
-        # 從 config 中獲取參數
-        beta = self.config['weibull_beta']
-        eta_0 = self.config['weibull_eta_0']
-        alpha_uk = self.config['alpha_uk']
-        alpha_sk = self.config['alpha_sk']
+        makespan = max(op['end_time'] for op in self.schedule.values())
+        if makespan == 0:
+            return 0, 0
 
-        # 根據論文公式計算動態尺度參數 η_rk
-        eta_dynamic = eta_0 / (1 + alpha_uk * utilization + alpha_sk * switch_count)
+        # 計算總加工時間
+        total_processing_time = sum(op['end_time'] - op['start_time'] for op in machine_ops)
         
-        if eta_dynamic <= 0:
-            return float('inf')
+        # 計算利用率
+        utilization = total_processing_time / makespan
 
-        # 計算 Weibull 分布的累積故障率積分
-        integral_end = (end_t / eta_dynamic)**beta if end_t >= 0 else 0
-        integral_start = (start_t / eta_dynamic)**beta if start_t >= 0 else 0
-        
-        return integral_end - integral_start
+        # 計算切換次數 (簡化為工序數量 - 1)
+        switch_count = len(machine_ops) - 1 if len(machine_ops) > 1 else 0
+
+        return utilization, switch_count
 
     def _check_for_conflicts(self, pm_plans):
         """
@@ -153,40 +204,93 @@ class JointOptimizer:
 
     def _reschedule_operations(self, conflicts):
         """
-        根據論文演算法 2，重新排程受影響的作業。
+        根據論文演算法 2 的思想，重新排程受影響的作業。
+        採用貪婪插入的啟發式方法進行重新排程。
         """
-        # 1. 識別所有受衝突影響的作業
-        affected_ops = set()
-        for conflict in conflicts:
-            affected_ops.add(conflict['conflicting_op'])
-            # 這裡還需要找出所有在衝突作業之後的、有依賴關係的作業
+        # 1. 確定所有受影響的工序
+        affected_op_keys = set()
+        pm_windows = {c['machine_id']: [] for c in conflicts}
+        for c in conflicts:
+            affected_op_keys.add(c['conflicting_op'])
+            # 記錄 PM 時間窗口
+            pm_plan = c['pm_plan']
+            pm_windows[c['machine_id']].append((pm_plan['start_time'], pm_plan['start_time'] + pm_plan['duration']))
 
-        # 2. 從當前排程中移除這些作業
-        reschedule_queue = []
-        remaining_schedule = self.schedule.copy()
-        for op_id in affected_ops:
-            if op_id in remaining_schedule:
-                reschedule_queue.append(remaining_schedule.pop(op_id))
+        # 找出所有後續工序
+        ops_to_reschedule = set()
+        for job_id, op_id in affected_op_keys:
+            job_ops = self.jobs[job_id].operations
+            for i in range(op_id, len(job_ops)):
+                ops_to_reschedule.add((job_id, i))
 
-        # 3. 使用 VNS 進行局部優化
-        # 這裡需要一個修改版的 VNS，只對 reschedule_queue 中的作業進行操作
-        # 這是一個非常複雜的步驟，我們先用一個簡化的邏輯代替
-        
-        # 簡化邏輯：將受影響的作業簡單地推遲
-        for op in reschedule_queue:
-            pm_duration = self.config['pm_duration']
-            op['start_time'] += pm_duration
-            op['end_time'] += pm_duration
-            remaining_schedule[op['id']] = op # 將作業重新加回排程
+        # 2. 從排程中移除這些工序，並按 job_id, op_id 排序
+        reschedule_queue = sorted(list(ops_to_reschedule))
+        for key in reschedule_queue:
+            if key in self.schedule:
+                del self.schedule[key]
 
-        self.schedule = remaining_schedule
-        print(f"  簡化版重新排程完成，{len(reschedule_queue)} 個作業被推遲。")
+        # 3. 貪婪插入重新排程
+        # 重新計算 job 和 machine 的可用時間
+        machine_end_times = {m.machine_id: 0 for m in self.machines}
+        job_end_times = {j.job_id: 0 for j in self.jobs}
+        for key, op_info in self.schedule.items():
+            machine_end_times[op_info['machine']] = max(machine_end_times[op_info['machine']], op_info['end_time'])
+            job_end_times[key[0]] = max(job_end_times[key[0]], op_info['end_time'])
+
+        for job_id, op_id in reschedule_queue:
+            operation = self.jobs[job_id].operations[op_id]
+            # 假設機器分配不變
+            # 在更複雜的實作中，這裡可以重新選擇機器
+            assigned_machine = None
+            for key, op_info in self.initial_schedule.items(): # 從初始排程中找回機器分配
+                if key == (job_id, op_id):
+                    assigned_machine = op_info['machine']
+                    break
+            
+            if assigned_machine is None: continue
+
+            processing_time = operation.candidate_machines[assigned_machine]
+            
+            # 找到最早的可用開始時間
+            earliest_start_time = max(machine_end_times[assigned_machine], job_end_times[job_id])
+
+            # 檢查 PM 衝突
+            is_valid_slot = False
+            while not is_valid_slot:
+                is_valid_slot = True
+                end_time = earliest_start_time + processing_time
+                if assigned_machine in pm_windows:
+                    for pm_start, pm_end in pm_windows[assigned_machine]:
+                        # 如果工序與 PM 窗口重疊，則將工序推遲到 PM 結束後
+                        if max(earliest_start_time, pm_start) < min(end_time, pm_end):
+                            earliest_start_time = pm_end
+                            is_valid_slot = False
+                            break # 重新檢查新的時間點
+            
+            new_end_time = earliest_start_time + processing_time
+
+            # 更新排程和時間
+            self.schedule[(job_id, op_id)] = {
+                'machine': assigned_machine,
+                'start_time': earliest_start_time,
+                'end_time': new_end_time
+            }
+            machine_end_times[assigned_machine] = new_end_time
+            job_end_times[job_id] = new_end_time
+
+        print(f"  重新排程完成，{len(reschedule_queue)} 個工序被重新安排。")
 
     def _apply_pm_to_schedule(self, pm_plans):
         """
-        將無衝突的 PM 活動應用到最終排程中。
+        將無衝突的 PM 活動作為特殊標記應用到最終排程中。
         """
-        pass
+        for machine_id, pm_plan in pm_plans.items():
+            pm_key = (f"PM_M{machine_id}", 0)
+            self.schedule[pm_key] = {
+                'machine': machine_id,
+                'start_time': pm_plan['start_time'],
+                'end_time': pm_plan['start_time'] + pm_plan['duration']
+            }
 
     def _calculate_total_cost(self):
         """

@@ -14,8 +14,8 @@ def main():
     print("開始執行 FJSSP-PM 聯合優化...")
 
     # 1. 載入數據
-    # 假設論文的數據表格已經轉換為 CSV 檔案
-    loader = DataLoader(table_a1_path='data/table_a1.csv', table_a2_path='data/table_a2.csv')
+    # 從 data_loader.py 中載入硬編碼的數據
+    loader = DataLoader()
     maintenance_data = loader.load_maintenance_data()
     production_data, beta_vectors = loader.load_production_data()
 
@@ -35,11 +35,11 @@ def main():
         machines.append(machine)
 
     # 3. 執行第一階段：初始排程
-    initial_scheduler = InitialScheduler(jobs, machines, config.COST_PARAMS)
+    initial_scheduler = InitialScheduler(jobs, machines, config)
     initial_schedule, initial_objective = initial_scheduler.solve()
 
     # 4. 執行第二階段：聯合優化
-    joint_optimizer = JointOptimizer(initial_schedule, jobs, machines, config.COST_PARAMS)
+    joint_optimizer = JointOptimizer(initial_schedule, jobs, machines, config)
     final_schedule, final_objective = joint_optimizer.solve()
 
     # 5. 輸出最終結果
